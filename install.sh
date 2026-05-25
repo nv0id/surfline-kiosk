@@ -19,14 +19,28 @@ echo ""
 # ── 1. System packages ────────────────────────────────────────────────────────
 echo "[1/5] Installing packages (this may take a few minutes)..."
 sudo apt-get update -qq
+
+# Install base packages
 sudo apt-get install -y --no-install-recommends \
     xserver-xorg \
     xinit \
     openbox \
-    chromium-browser \
     unclutter \
     python3-pip
-echo "      ✓ xorg, xinit, openbox, chromium-browser, unclutter"
+
+# Chromium: Bookworm (Debian 12) uses 'chromium', Bullseye uses 'chromium-browser'
+if apt-cache show chromium &>/dev/null; then
+    sudo apt-get install -y --no-install-recommends chromium
+    echo "      ✓ chromium (Bookworm)"
+elif apt-cache show chromium-browser &>/dev/null; then
+    sudo apt-get install -y --no-install-recommends chromium-browser
+    echo "      ✓ chromium-browser (Bullseye)"
+else
+    echo "ERROR: Could not find chromium or chromium-browser in apt. Check your sources."
+    exit 1
+fi
+
+echo "      ✓ xorg, xinit, openbox, unclutter"
 
 # ── 2. Python dependency ──────────────────────────────────────────────────────
 echo "[2/5] Installing Python dependency..."
@@ -94,12 +108,16 @@ echo "    → startx → ~/.xinitrc"
 echo "    → openbox + server.py"
 echo "    → Chrome launches in kiosk mode"
 echo ""
+# Detect which chromium binary is installed for the help text
+CHROMIUM_BIN="chromium"
+command -v chromium-browser &>/dev/null && CHROMIUM_BIN="chromium-browser"
+
 echo "  ── Surfline login ────────────────────"
 echo "  The kiosk will open Surfline automatically."
 echo "  To log in, temporarily stop the kiosk and run:"
 echo ""
-echo "    pkill -f server.py && pkill chromium-browser"
-echo "    DISPLAY=:0 chromium-browser \\"
+echo "    pkill -f server.py && pkill $CHROMIUM_BIN"
+echo "    DISPLAY=:0 $CHROMIUM_BIN \\"
 echo "      --user-data-dir=$SCRIPT_DIR/chrome_profile \\"
 echo "      https://www.surfline.com/sign-in"
 echo ""
@@ -107,7 +125,7 @@ echo "  Log in, close Chrome, then restart:"
 echo "    python3 $SCRIPT_DIR/server.py"
 echo ""
 echo "  ── Useful commands ───────────────────"
-echo "  Stop kiosk:     pkill -f server.py && pkill chromium-browser"
+echo "  Stop kiosk:     pkill -f server.py && pkill $CHROMIUM_BIN"
 echo "  Restart kiosk:  python3 $SCRIPT_DIR/server.py"
 echo "  Reboot now:     sudo reboot"
 echo ""
