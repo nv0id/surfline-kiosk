@@ -30,7 +30,7 @@ All panels are pre-loaded Chrome tabs. Switching is a single CDP call — no rel
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/nv0id/bantham-kiosk.git
+git clone https://github.com/nv0id/surfline-kiosk.git
 cd bantham-kiosk
 
 # 2. Install the Python dependency
