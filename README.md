@@ -30,7 +30,7 @@ All panels are pre-loaded Chrome tabs. Switching is a single CDP call — no rel
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/nv0id/surfline-kiosk.git
+git clone https://github.com/yourname/bantham-kiosk.git
 cd bantham-kiosk
 
 # 2. Install the Python dependency
@@ -56,18 +56,19 @@ chmod +x install.sh
 sudo reboot
 ```
 
-The install script:
-- Installs `websocket-client`
-- Installs `unclutter` (hides the mouse cursor)
-- Disables screen blanking and DPMS
-- Creates an autostart entry so the kiosk launches on every boot
+The install script handles everything from a fresh Lite image:
+- Installs a minimal X stack (`xorg`, `xinit`, `openbox`)
+- Installs `chromium` and `websocket-client`
+- Configures X server permissions (`Xwrapper`, `fbdev` driver)
+- Adds the user to the required hardware groups (`tty`, `video`, `input`, `render`)
+- Sets up autologin on tty1 via systemd
+- Creates `~/.xinitrc` and `~/.bash_profile` entries so the kiosk starts automatically on boot
 
 ### Requirements
 
-- Raspberry Pi OS with desktop (Bullseye or Bookworm)
-- Auto-login to desktop enabled  
-  *(Raspberry Pi Configuration → System → Auto login)*
-- Chromium installed (pre-installed on Raspberry Pi OS)
+- **Raspberry Pi OS Lite** (Bookworm, 64-bit) — tested on Pi 4
+- No desktop environment needed — the install script sets up everything from scratch
+- HDMI monitor connected before booting
 
 ---
 
@@ -77,10 +78,11 @@ The kiosk uses a persistent Chrome profile stored in `./chrome_profile/`. You ne
 
 **On macOS** — just run the kiosk, navigate to Surfline in the kiosk window, and log in. The session persists automatically.
 
-**On the Pi** — run this once with a monitor and keyboard attached, log in, then close the window:
+**On the Pi** — stop the kiosk, open a browser manually, log in, then restart:
 
 ```bash
-chromium-browser \
+pkill -f server.py; pkill chromium
+DISPLAY=:0 chromium \
   --user-data-dir=/path/to/bantham-kiosk/chrome_profile \
   https://www.surfline.com/sign-in
 ```
