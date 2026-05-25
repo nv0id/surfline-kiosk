@@ -89,15 +89,12 @@ CHROME_FLAGS = [
     "--autoplay-policy=no-user-gesture-required",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
-    # GPU / performance — helps on low-RAM devices like Pi 4
-    "--ignore-gpu-blocklist",
-    "--enable-gpu-rasterization",
-    "--enable-zero-copy",
-    "--disable-features=UseChromeOSDirectVideoDecoder",
-    "--num-raster-threads=4",
-    # Limit memory use
-    "--renderer-process-limit=2",
+    # fbdev is a software renderer — disable GPU paths so Chrome doesn't thrash
+    "--disable-gpu",
+    "--disable-software-rasterizer",
+    # Memory — important on 1 GB Pi
     "--disable-dev-shm-usage",          # use /tmp instead of /dev/shm (avoids OOM)
+    "--renderer-process-limit=2",
     f"--remote-debugging-port={CDP_PORT}",
     "--remote-allow-origins=*",
     "about:blank",
