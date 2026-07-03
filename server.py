@@ -6,6 +6,11 @@ All panels run as pre-loaded Chrome tabs. Switching is instant (CDP activateTarg
 HLS streams are played by hls.js inside local HTML pages served by this script.
 Surfline pages open directly in Chrome — login persists via --user-data-dir.
 
+Low-memory design (1 GB Pi): streams do NOT run in the background. The next
+panel's stream is warmed WARM_AHEAD seconds before it appears and destroyed
+once the panel rotates out, so at most two streams are ever live. Surfline
+tabs reload at most every SURFLINE_RELOAD_SECS.
+
 Rotation:
   Bantham (10s)  →  Bantham OV (10s)  →  Bigbury (10s)
   → Surfline Forecast (20s)  →  Weather (10s)
@@ -68,6 +73,14 @@ ROTATION = [
 # Seconds to wait after creating all tabs before starting the rotation
 PAGE_LOAD_WAIT = 12
 
+# Start the NEXT panel's video stream this many seconds before switching to it,
+# so it's already playing when shown. Streams are destroyed once a panel rotates
+# out — at most 1 warming + 1 visible panel hold live streams at any time.
+WARM_AHEAD = 6
+
+# Reload Surfline tabs at most this often (seconds)
+SURFLINE_RELOAD_SECS = 600
+
 # Chrome persistent profile — login cookies live here
 CHROME_PROFILE = Path(__file__).parent / "chrome_profile"
 
@@ -87,14 +100,11 @@ CHROME_FLAGS = [
     "--noerrdialogs",
     "--disable-infobars",
     "--autoplay-policy=no-user-gesture-required",
-    "--disable-background-timer-throttling",
-    "--disable-renderer-backgrounding",
-    # fbdev is a software renderer — disable GPU paths so Chrome doesn't thrash
-    "--disable-gpu",
-    "--disable-software-rasterizer",
-    # Memory — important on 1 GB Pi
-    "--disable-dev-shm-usage",          # use /tmp instead of /dev/shm (avoids OOM)
-    "--renderer-process-limit=2",
+    # Low-memory tuning (1 GB Pi): let Chrome throttle background tabs,
+    # share renderer processes per site, and enable low-end device mode.
+    "--process-per-site",
+    "--enable-low-end-device-mode",
+    "--js-flags=--max-old-space-size=128",
     f"--remote-debugging-port={CDP_PORT}",
     "--remote-allow-origins=*",
     "about:blank",
@@ -116,8 +126,12 @@ def launch_chrome():
     sys.exit("[kiosk] No Chrome/Chromium binary found. Install Chromium or Google Chrome.")
 
 
-# Indices of Surfline tabs — these get reloaded in the background after each showing
+# Indices of Surfline tabs — reloaded in the background when stale
 SURFLINE_IDXS = {i for i, s in enumerate(ROTATION) if "surfline.com" in s["url"]}
+
+# Indices of panels that contain HLS video players (support kioskStart/kioskStop)
+VIDEO_IDXS = {i for i, s in enumerate(ROTATION)
+              if "/cam/" in s["url"] or "/multiview" in s["url"]}
 
 # ── HTML pages ────────────────────────────────────────────────────────────────
 
@@ -126,7 +140,59 @@ _RESET = (
     "html,body {width:100%;height:100%;background:#000;overflow:hidden}"
 )
 HLS_JS = "https://cdn.jsdelivr.net/npm/hls.js@1.5.7/dist/hls.min.js"
-HLS_CFG = "{manifestLoadingMaxRetry:8,levelLoadingMaxRetry:8,fragLoadingMaxRetry:8}"
+# Buffer caps matter on 1 GB: hls.js's default back-buffer is unbounded and
+# grows for as long as a stream plays.
+HLS_CFG = ("{manifestLoadingMaxRetry:8,levelLoadingMaxRetry:8,fragLoadingMaxRetry:8,"
+           "maxBufferLength:12,maxMaxBufferLength:20,backBufferLength:4,"
+           "liveSyncDurationCount:3}")
+
+# Shared player-lifecycle JS. Defines kioskStart()/kioskStop() over a list of
+# [videoElementId, hlsSrc] pairs. Streams only exist between start and stop —
+# the server warms the next panel just before showing it and stops panels
+# after they rotate out. Safety nets: start on becoming visible, stop after
+# 20 s hidden (in case a CDP call was missed).
+def _player_js(pairs_js: str) -> str:
+    return f"""
+const PLAYERS = {pairs_js}.map(([id, src]) => ({{v: document.getElementById(id), src, hls: null}}));
+let hiddenSince = null;
+
+function kioskStart() {{
+  hiddenSince = Date.now();   // grace period: warming happens while still hidden
+  PLAYERS.forEach(p => {{
+    if (p.hls) {{ if (p.v.paused) p.v.play().catch(() => {{}}); return; }}
+    p.hls = new Hls({HLS_CFG});
+    p.hls.loadSource(p.src);
+    p.hls.attachMedia(p.v);
+    p.hls.on(Hls.Events.MANIFEST_PARSED, () => p.v.play().catch(() => {{}}));
+  }});
+}}
+function kioskStop() {{
+  PLAYERS.forEach(p => {{
+    if (!p.hls) return;
+    p.hls.destroy();          // frees decoder + all buffered media
+    p.hls = null;
+    p.v.removeAttribute('src');
+    p.v.load();
+  }});
+}}
+window.kioskStart = kioskStart;
+window.kioskStop  = kioskStop;
+
+document.addEventListener('visibilitychange', () => {{
+  if (document.visibilityState === 'visible') {{ hiddenSince = null; kioskStart(); }}
+  else hiddenSince = Date.now();
+}});
+setInterval(() => {{
+  if (document.hidden) {{
+    if (hiddenSince === null) hiddenSince = Date.now();
+    if (Date.now() - hiddenSince > 20000) kioskStop();
+  }} else {{
+    PLAYERS.forEach(p => {{ if (p.hls && p.v.paused) p.v.play().catch(() => {{}}); }});
+  }}
+}}, 5000);
+
+if (document.visibilityState === 'visible') kioskStart();
+"""
 
 
 def cam_page(key: str) -> str:
@@ -140,22 +206,11 @@ video {{width:100%;height:100%;object-fit:contain}}
 #lbl  {{position:fixed;top:20px;left:20px;background:rgba(0,0,0,.6);color:#fff;
         font:300 1.4rem/1 system-ui;padding:6px 16px;border-radius:6px;letter-spacing:.04em}}
 </style></head><body>
-<video id="v" autoplay muted playsinline></video>
+<video id="v" muted playsinline></video>
 <div id="lbl">{label}</div>
 <script src="{HLS_JS}"></script>
 <script>
-const hls = new Hls({HLS_CFG});
-hls.loadSource('{src}');
-hls.attachMedia(document.getElementById('v'));
-hls.on(Hls.Events.MANIFEST_PARSED, () => document.getElementById('v').play().catch(() => {{}}));
-// Keep playing if Chrome throttled the background tab
-document.addEventListener('visibilitychange', () => {{
-  if (document.visibilityState === 'visible') {{
-    const v = document.getElementById('v');
-    if (v.paused) v.play().catch(() => {{}});
-  }}
-}});
-setInterval(() => {{ const v = document.getElementById('v'); if (v.paused) v.play().catch(() => {{}}); }}, 3000);
+{_player_js(json.dumps([["v", src]]))}
 </script>
 </body></html>"""
 
@@ -247,12 +302,12 @@ def multiview_page() -> str:
     mv = [("bantham", "Bantham"), ("bantham_ov", "Bantham OV")]
     slots = "\n".join(
         f'  <div class="slot">'
-        f'<video id="v{i}" autoplay muted playsinline></video>'
+        f'<video id="v{i}" muted playsinline></video>'
         f'<div class="lbl">{label}</div>'
         f'</div>'
         for i, (_, label) in enumerate(mv)
     )
-    srcs_js = json.dumps([STREAMS[k] for k, _ in mv])
+    pairs_js = json.dumps([[f"v{i}", STREAMS[k]] for i, (k, _) in enumerate(mv)])
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>Multiview</title>
 <style>
@@ -266,14 +321,7 @@ video {{width:100%;height:100%;object-fit:cover}}
 {slots}
 <script src="{HLS_JS}"></script>
 <script>
-{srcs_js}.forEach((src, i) => {{
-  const hls = new Hls({HLS_CFG});
-  const v   = document.getElementById('v' + i);
-  hls.loadSource(src);
-  hls.attachMedia(v);
-  hls.on(Hls.Events.MANIFEST_PARSED, () => v.play().catch(() => {{}}));
-  setInterval(() => {{ if (v.paused) v.play().catch(() => {{}}); }}, 3000);
-}});
+{_player_js(pairs_js)}
 </script>
 </body></html>"""
 
@@ -383,6 +431,31 @@ def _reload(target_id):
             return
 
 
+def _eval(target_id, expression):
+    """Run JS in a tab; returns the result value or None."""
+    for t in _cdp("/json"):
+        if t.get("id") == target_id and "webSocketDebuggerUrl" in t:
+            r = _ws(t["webSocketDebuggerUrl"], "Runtime.evaluate",
+                    {"expression": expression, "returnByValue": True})
+            return r.get("result", {}).get("result", {}).get("value")
+
+
+def _start_stream(tab_ids, idx, label):
+    try:
+        _eval(tab_ids[idx], "window.kioskStart && window.kioskStart()")
+        print(f"[kiosk]   ▶ warm {label}")
+    except Exception as e:
+        print(f"[kiosk]   warm error ({label}): {e}")
+
+
+def _stop_stream(tab_ids, idx, label):
+    try:
+        _eval(tab_ids[idx], "window.kioskStop && window.kioskStop()")
+        print(f"[kiosk]   ■ stop {label}")
+    except Exception as e:
+        print(f"[kiosk]   stop error ({label}): {e}")
+
+
 # Scroll Surfline to "Current Surf Conditions" (or similar heading).
 # Matches by text content only — no class names — so it survives redesigns.
 _SURF_SCROLL_JS = """
@@ -468,28 +541,47 @@ def rotation_loop():
         except Exception:
             pass
 
-    # Give all tabs time to load before the rotation begins
+    # Give all tabs time to load before the rotation begins.
+    # (Video pages load light — streams don't start until warmed/visible.)
     print(f"[kiosk] Preloading — waiting {PAGE_LOAD_WAIT}s…")
     time.sleep(PAGE_LOAD_WAIT)
     print("[kiosk] Rotation started")
+
+    n = len(ROTATION)
+    surfline_last_reload = {i: 0.0 for i in SURFLINE_IDXS}
+    prev_video = None   # index of the last video panel shown, to stop it
 
     while True:
         for i, (tid, step) in enumerate(zip(tab_ids, ROTATION)):
             try:
                 _browser("Target.activateTarget", {"targetId": tid})
                 print(f"[kiosk] → {step['label']}  ({step['duration']}s)")
+                if i in VIDEO_IDXS:
+                    _start_stream(tab_ids, i, step["label"])  # idempotent (warmed already)
                 if step.get("scroll"):
                     _scroll_surfline(tid)   # non-blocking, fires after 1.5 s
             except Exception as e:
                 print(f"[kiosk] activate error: {e}")
 
-            time.sleep(step["duration"])
+            # Kill the previous panel's stream now that it's off-screen
+            if prev_video is not None and prev_video != i:
+                _stop_stream(tab_ids, prev_video, ROTATION[prev_video]["label"])
+            prev_video = i if i in VIDEO_IDXS else None
 
-            # Reload Surfline tabs in the background right after showing them.
-            # They have a full rotation cycle (~80 s) to reload before next slot.
-            if i in SURFLINE_IDXS:
+            # Sleep most of the slot, then warm the next panel's stream so it's
+            # already playing when it appears.
+            warm = min(WARM_AHEAD, step["duration"])
+            time.sleep(step["duration"] - warm)
+            nxt = (i + 1) % n
+            if nxt in VIDEO_IDXS and nxt != i:
+                _start_stream(tab_ids, nxt, ROTATION[nxt]["label"])
+            time.sleep(warm)
+
+            # Reload Surfline tabs in the background when stale (>10 min)
+            if i in SURFLINE_IDXS and time.time() - surfline_last_reload[i] > SURFLINE_RELOAD_SECS:
                 try:
                     _reload(tid)
+                    surfline_last_reload[i] = time.time()
                     print(f"[kiosk]   reloading {step['label']} in background")
                 except Exception as e:
                     print(f"[kiosk]   reload error: {e}")

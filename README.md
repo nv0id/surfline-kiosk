@@ -16,6 +16,8 @@ A full-screen rotating surf kiosk for a Raspberry Pi (or Mac). Displays live sur
 
 All panels are pre-loaded Chrome tabs. Switching is a single CDP call — no reload, no blank screen.
 
+**Low-memory stream lifecycle (for 1 GB Pis):** video streams do not run in the background. The next panel's stream is started ~6 s before it appears (so it's already playing when shown) and destroyed once the panel rotates out. At most two streams are live at any moment, instead of five running constantly.
+
 ---
 
 ## Prerequisites
@@ -30,7 +32,7 @@ All panels are pre-loaded Chrome tabs. Switching is a single CDP call — no rel
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/yourname/bantham-kiosk.git
+git clone https://github.com/nv0id/bantham-kiosk.git
 cd bantham-kiosk
 
 # 2. Install the Python dependency
@@ -56,19 +58,18 @@ chmod +x install.sh
 sudo reboot
 ```
 
-The install script handles everything from a fresh Lite image:
-- Installs a minimal X stack (`xorg`, `xinit`, `openbox`)
-- Installs `chromium` and `websocket-client`
-- Configures X server permissions (`Xwrapper`, `fbdev` driver)
-- Adds the user to the required hardware groups (`tty`, `video`, `input`, `render`)
-- Sets up autologin on tty1 via systemd
-- Creates `~/.xinitrc` and `~/.bash_profile` entries so the kiosk starts automatically on boot
+The install script:
+- Installs `websocket-client`
+- Installs `unclutter` (hides the mouse cursor)
+- Disables screen blanking and DPMS
+- Creates an autostart entry so the kiosk launches on every boot
 
 ### Requirements
 
-- **Raspberry Pi OS Lite** (Bookworm, 64-bit) — tested on Pi 4
-- No desktop environment needed — the install script sets up everything from scratch
-- HDMI monitor connected before booting
+- Raspberry Pi OS with desktop (Bullseye or Bookworm)
+- Auto-login to desktop enabled  
+  *(Raspberry Pi Configuration → System → Auto login)*
+- Chromium installed (pre-installed on Raspberry Pi OS)
 
 ---
 
@@ -78,11 +79,10 @@ The kiosk uses a persistent Chrome profile stored in `./chrome_profile/`. You ne
 
 **On macOS** — just run the kiosk, navigate to Surfline in the kiosk window, and log in. The session persists automatically.
 
-**On the Pi** — stop the kiosk, open a browser manually, log in, then restart:
+**On the Pi** — run this once with a monitor and keyboard attached, log in, then close the window:
 
 ```bash
-pkill -f server.py; pkill chromium
-DISPLAY=:0 chromium \
+chromium-browser \
   --user-data-dir=/path/to/bantham-kiosk/chrome_profile \
   https://www.surfline.com/sign-in
 ```
@@ -157,7 +157,7 @@ server.py
     └── Rotates by calling Target.activateTarget
 ```
 
-Surfline tabs are reloaded in the background immediately after their slot ends, so they're always fresh for the next cycle (~80 s to reload).
+Surfline tabs are reloaded in the background after their slot ends, at most once every 10 minutes (`SURFLINE_RELOAD_SECS`).
 
 ---
 
