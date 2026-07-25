@@ -100,11 +100,20 @@ CHROME_FLAGS = [
     "--noerrdialogs",
     "--disable-infobars",
     "--autoplay-policy=no-user-gesture-required",
-    # Low-memory tuning (1 GB Pi): let Chrome throttle background tabs,
-    # share renderer processes per site, and enable low-end device mode.
+    # Display scaling for the kiosk screen
+    "--force-device-scale-factor=1.75",
+    # fbdev is a software renderer — disable GPU paths so Chrome doesn't thrash.
+    # NB: do NOT add --disable-software-rasterizer alongside this; together they
+    # leave Chrome with no renderer at all.
+    "--disable-gpu",
+    # Memory — important on 1 GB Pi
+    "--disable-dev-shm-usage",          # use /tmp instead of /dev/shm (avoids OOM)
+    "--renderer-process-limit=1",
+    # Low-memory tuning: share renderer processes per site, low-end device mode.
+    # No --js-flags heap cap: with renderer-process-limit=1 every tab shares one
+    # process, and a global cap there risks OOM-killing the whole kiosk.
     "--process-per-site",
     "--enable-low-end-device-mode",
-    "--js-flags=--max-old-space-size=128",
     f"--remote-debugging-port={CDP_PORT}",
     "--remote-allow-origins=*",
     "about:blank",
